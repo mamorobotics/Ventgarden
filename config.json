@@ -1,0 +1,36 @@
+{
+    "serial": {
+        "port": "/dev/cu.usbserial-1110",
+        "baud_rate": 31250,
+        "timeout": 0
+    },
+    "controller": {
+        "id": 0,
+        "deadzone": 0.05,
+        "send_interval_ms": 70,
+        "axis_map": {
+            "ljoyx": 0,
+            "ljoyy": 1,
+            "rjoyx": 2,
+            "rjoyy": 3,
+            "ltrigger": 4,
+            "rtrigger": 5
+        },
+        "button_map": {
+            "x": 0,
+            "a": 1,
+            "b": 2,
+            "y": 3,
+            "lbumper": 4,
+            "rbumper": 5,
+            "up": 11,
+            "right": 12,
+            "down": 13,
+            "left": 14
+        },
+        "invert_axes": {
+            "ljoyy": true,
+            "rjoyy": true
+        }
+    }
+}
