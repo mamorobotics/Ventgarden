@@ -39,14 +39,14 @@ _libc.setlocale.restype = ctypes.c_char_p
 _libc.setlocale(locale.LC_NUMERIC, b"C")
 
 import mpv
-from PyQt6.QtWidgets import (
+from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget,
     QVBoxLayout, QHBoxLayout,
     QPushButton, QLineEdit, QLabel, QStatusBar,
 )
-from PyQt6.QtOpenGLWidgets import QOpenGLWidget
-from PyQt6.QtCore import Qt, QTimer, QMetaObject, Q_ARG, QObject
-from PyQt6.QtGui import QOpenGLContext
+from PySide6.QtOpenGLWidgets import QOpenGLWidget
+from PySide6.QtCore import Qt, QTimer, QMetaObject
+from PySide6.QtGui import QOpenGLContext
 
 
 
@@ -96,7 +96,7 @@ class MpvWidget(QOpenGLWidget):
         if ctx is None:
             return 0
         addr = ctx.getProcAddress(name)
-        # getProcAddress returns an int on PyQt6; wrap safely.
+        # getProcAddress returns an integer pointer value; wrap safely.
         try:
             return ctypes.cast(int(addr), ctypes.c_void_p).value or 0
         except (TypeError, ctypes.ArgumentError):
