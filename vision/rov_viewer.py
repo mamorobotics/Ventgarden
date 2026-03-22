@@ -26,14 +26,46 @@ import ctypes
 import ctypes.util
 import locale
 import argparse
+import subprocess
 
 def _configure_runtime_locale() -> None:
-    if not any(
-        "UTF-8" in os.environ.get(name, "").upper()
-        for name in ("LC_ALL", "LC_CTYPE", "LANG")
-    ):
-        os.environ.setdefault("LANG", "C.UTF-8")
-        os.environ.setdefault("LC_CTYPE", "C.UTF-8")
+    def _has_utf8(value: str) -> bool:
+        upper_value = value.upper()
+        return "UTF-8" in upper_value or "UTF8" in upper_value
+
+    def _normalize_locale_name(value: str) -> str:
+        return "".join(ch for ch in value.lower() if ch.isalnum())
+
+    def _detect_utf8_locale() -> str | None:
+        preferred = ["C.UTF-8", "en_US.UTF-8", "en_GB.UTF-8"]
+        try:
+            result = subprocess.run(
+                ["locale", "-a"],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            available = {line.strip() for line in result.stdout.splitlines() if line.strip()}
+            normalized = {_normalize_locale_name(entry): entry for entry in available}
+            for candidate in preferred:
+                match = normalized.get(_normalize_locale_name(candidate))
+                if match:
+                    return match
+            for entry in available:
+                if _has_utf8(entry):
+                    return entry
+        except Exception:
+            return None
+        return None
+
+    effective_locale = os.environ.get("LC_ALL") or os.environ.get("LC_CTYPE") or os.environ.get("LANG", "")
+    if not _has_utf8(effective_locale):
+        utf8_locale = _detect_utf8_locale()
+        if utf8_locale:
+            os.environ["LANG"] = utf8_locale
+            os.environ["LC_CTYPE"] = utf8_locale
+            if os.environ.get("LC_ALL"):
+                os.environ["LC_ALL"] = utf8_locale
 
     libc_path = ctypes.util.find_library("c")
     if not libc_path:
