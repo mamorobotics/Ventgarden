@@ -13,6 +13,16 @@ MPV
 Build µStreamer on the ROV side - existing package repos are generally outdated
 Python installation
 
+Ensure you have Anaconda / Miniconda installed. 
+
+Then, create the conda environment based on the environment.yml file. 
+
+`conda env create -f environment.yml`
+
+Then, activate the environment `conda activate VentgardenENV`
+
+You should be ready to run the relevant python files!
+
 ## Todo
 - [ ] Implement config.json
 - [ ] More debugging details on the controller / serial bridge
