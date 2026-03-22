@@ -27,16 +27,32 @@ import ctypes.util
 import locale
 import argparse
 
-# libmpv checks the *C runtime* locale via libc setlocale().
-# We must set it before libmpv.dylib is loaded (which happens at `import mpv`).
-#
-# Only set LC_NUMERIC to C — libmpv needs this for float parsing.
-# Do NOT set LC_ALL=C, that breaks Qt which requires a UTF-8 locale.
-os.environ["LC_NUMERIC"] = "C"
+def _configure_runtime_locale() -> None:
+    # Qt requires a UTF-8 locale. If the shell locale is missing/non-UTF-8,
+    # default to C.UTF-8 for text handling.
+    if not any(
+        "UTF-8" in os.environ.get(name, "").upper()
+        for name in ("LC_ALL", "LC_CTYPE", "LANG")
+    ):
+        os.environ.setdefault("LANG", "C.UTF-8")
+        os.environ.setdefault("LC_CTYPE", "C.UTF-8")
 
-_libc = ctypes.CDLL(ctypes.util.find_library("c"), use_errno=True)
-_libc.setlocale.restype = ctypes.c_char_p
-_libc.setlocale(locale.LC_NUMERIC, b"C")
+    libc_path = ctypes.util.find_library("c")
+    if not libc_path:
+        return
+
+    libc = ctypes.CDLL(libc_path, use_errno=True)
+    libc.setlocale.restype = ctypes.c_char_p
+    libc.setlocale.argtypes = [ctypes.c_int, ctypes.c_char_p]
+
+    # Apply LC_CTYPE from environment (UTF-8 for Qt), then force numeric C
+    # for libmpv float parsing.
+    libc.setlocale(locale.LC_CTYPE, b"")
+    os.environ["LC_NUMERIC"] = "C"
+    libc.setlocale(locale.LC_NUMERIC, b"C")
+
+
+_configure_runtime_locale()
 
 import mpv
 from PySide6.QtWidgets import (
