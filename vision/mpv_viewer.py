@@ -144,6 +144,9 @@ class MpvWidget(QWidget):
             vd_lavc_threads=1,
             framedrop="vo",
             video_sync="desync",
+            profile='low-latency',
+            untimed=True,
+            hwdec='auto',
         )
         return True
 
