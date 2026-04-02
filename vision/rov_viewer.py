@@ -26,27 +26,67 @@ import ctypes
 import ctypes.util
 import locale
 import argparse
+import subprocess
 
-# libmpv checks the *C runtime* locale via libc setlocale().
-# We must set it before libmpv.dylib is loaded (which happens at `import mpv`).
-#
-# Only set LC_NUMERIC to C — libmpv needs this for float parsing.
-# Do NOT set LC_ALL=C, that breaks Qt which requires a UTF-8 locale.
-os.environ["LC_NUMERIC"] = "C"
+def _configure_runtime_locale() -> None:
+    def _has_utf8(value: str) -> bool:
+        upper_value = value.upper()
+        return "UTF-8" in upper_value or "UTF8" in upper_value
 
-_libc = ctypes.CDLL(ctypes.util.find_library("c"), use_errno=True)
-_libc.setlocale.restype = ctypes.c_char_p
-_libc.setlocale(locale.LC_NUMERIC, b"C")
+    def _normalize_locale_name(value: str) -> str:
+        return "".join(ch for ch in value.lower() if ch.isalnum())
 
-import mpv
-from PyQt6.QtWidgets import (
+    def _detect_utf8_locale() -> str | None:
+        preferred = ["C.UTF-8", "en_US.UTF-8", "en_GB.UTF-8"]
+        try:
+            result = subprocess.run(
+                ["locale", "-a"],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            available = {line.strip() for line in result.stdout.splitlines() if line.strip()}
+            normalized = {_normalize_locale_name(entry): entry for entry in available}
+            for candidate in preferred:
+                match = normalized.get(_normalize_locale_name(candidate))
+                if match:
+                    return match
+            for entry in available:
+                if _has_utf8(entry):
+                    return entry
+        except Exception:
+            return None
+        return None
+
+    effective_locale = os.environ.get("LC_ALL") or os.environ.get("LC_CTYPE") or os.environ.get("LANG", "")
+    if not _has_utf8(effective_locale):
+        utf8_locale = _detect_utf8_locale()
+        if utf8_locale:
+            os.environ["LANG"] = utf8_locale
+            os.environ["LC_CTYPE"] = utf8_locale
+            if os.environ.get("LC_ALL"):
+                os.environ["LC_ALL"] = utf8_locale
+
+    libc_path = ctypes.util.find_library("c")
+    if not libc_path:
+        return
+
+    libc = ctypes.CDLL(libc_path, use_errno=True)
+    libc.setlocale.restype = ctypes.c_char_p
+    libc.setlocale.argtypes = [ctypes.c_int, ctypes.c_char_p]
+    libc.setlocale(locale.LC_CTYPE, b"")
+    os.environ["LC_NUMERIC"] = "C"
+    libc.setlocale(locale.LC_NUMERIC, b"C")
+
+
+_configure_runtime_locale()
+
+from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget,
     QVBoxLayout, QHBoxLayout,
     QPushButton, QLineEdit, QLabel, QStatusBar,
 )
-from PyQt6.QtOpenGLWidgets import QOpenGLWidget
-from PyQt6.QtCore import Qt, QTimer, QMetaObject, Q_ARG, QObject
-from PyQt6.QtGui import QOpenGLContext
+from PySide6.QtCore import QTimer
 
 from mpv_viewer import MpvWidget
 

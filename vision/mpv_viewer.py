@@ -26,39 +26,91 @@ import ctypes
 import ctypes.util
 import locale
 import argparse
+import subprocess
 
-# libmpv checks the *C runtime* locale via libc setlocale().
-# We must set it before libmpv.dylib is loaded (which happens at `import mpv`).
-#
-# Only set LC_NUMERIC to C — libmpv needs this for float parsing.
-# Do NOT set LC_ALL=C, that breaks Qt which requires a UTF-8 locale.
-os.environ["LC_NUMERIC"] = "C"
+def _configure_runtime_locale() -> None:
+    def _has_utf8(value: str) -> bool:
+        upper_value = value.upper()
+        return "UTF-8" in upper_value or "UTF8" in upper_value
 
-_libc = ctypes.CDLL(ctypes.util.find_library("c"), use_errno=True)
-_libc.setlocale.restype = ctypes.c_char_p
-_libc.setlocale(locale.LC_NUMERIC, b"C")
+    def _normalize_locale_name(value: str) -> str:
+        return "".join(ch for ch in value.lower() if ch.isalnum())
+
+    def _detect_utf8_locale() -> str | None:
+        preferred = ["C.UTF-8", "en_US.UTF-8", "en_GB.UTF-8"]
+        try:
+            result = subprocess.run(
+                ["locale", "-a"],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            available = {line.strip() for line in result.stdout.splitlines() if line.strip()}
+            normalized = {_normalize_locale_name(entry): entry for entry in available}
+            for candidate in preferred:
+                match = normalized.get(_normalize_locale_name(candidate))
+                if match:
+                    return match
+            for entry in available:
+                if _has_utf8(entry):
+                    return entry
+        except Exception:
+            return None
+        return None
+
+    effective_locale = os.environ.get("LC_ALL") or os.environ.get("LC_CTYPE") or os.environ.get("LANG", "")
+    if not _has_utf8(effective_locale):
+        utf8_locale = _detect_utf8_locale()
+        if utf8_locale:
+            os.environ["LANG"] = utf8_locale
+            os.environ["LC_CTYPE"] = utf8_locale
+            if os.environ.get("LC_ALL"):
+                os.environ["LC_ALL"] = utf8_locale
+
+    libc_path = ctypes.util.find_library("c")
+    if not libc_path:
+        return
+
+    libc = ctypes.CDLL(libc_path, use_errno=True)
+    libc.setlocale.restype = ctypes.c_char_p
+    libc.setlocale.argtypes = [ctypes.c_int, ctypes.c_char_p]
+
+    # Apply LC_CTYPE from environment (UTF-8 for Qt), then force numeric C
+    # for libmpv float parsing.
+    libc.setlocale(locale.LC_CTYPE, b"")
+    os.environ["LC_NUMERIC"] = "C"
+    libc.setlocale(locale.LC_NUMERIC, b"C")
+
+
+def _force_numeric_c_locale() -> None:
+    libc_path = ctypes.util.find_library("c")
+    if not libc_path:
+        return
+    libc = ctypes.CDLL(libc_path, use_errno=True)
+    libc.setlocale.restype = ctypes.c_char_p
+    libc.setlocale.argtypes = [ctypes.c_int, ctypes.c_char_p]
+    os.environ["LC_NUMERIC"] = "C"
+    libc.setlocale(locale.LC_NUMERIC, b"C")
+
+
+_configure_runtime_locale()
 
 import mpv
-from PyQt6.QtWidgets import (
-    QApplication, QMainWindow, QWidget,
-    QVBoxLayout, QHBoxLayout,
-    QPushButton, QLineEdit, QLabel, QStatusBar,
-)
-from PyQt6.QtOpenGLWidgets import QOpenGLWidget
-from PyQt6.QtCore import Qt, QTimer, QMetaObject, Q_ARG, QObject
-from PyQt6.QtGui import QOpenGLContext
+from PySide6.QtCore import Qt
+from PySide6.QtWidgets import QWidget
 
 
 
 
 # ---------------------------------------------------------------------------
-# OpenGL render widget
+# Embedded mpv widget
 # ---------------------------------------------------------------------------
 
-class MpvWidget(QOpenGLWidget):
+class MpvWidget(QWidget):
     """
-    Hosts an mpv MpvRenderContext that renders directly into this
-    widget's OpenGL framebuffer. No CPU frame copies occur.
+    Hosts mpv directly inside a native QWidget using window-id embedding.
+    This is more robust on Linux systems where QOpenGLWidget may be
+    unavailable depending on Qt platform backend.
 
     Low-latency mpv options mirror the recommended ffplay flags:
         -fflags nobuffer -flags low_delay -framedrop -vf setpts=0
@@ -66,100 +118,66 @@ class MpvWidget(QOpenGLWidget):
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
-        self.setAttribute(Qt.WidgetAttribute.WA_OpaquePaintEvent)
+        self.setAttribute(Qt.WidgetAttribute.WA_NativeWindow, True)
+        self.setAttribute(Qt.WidgetAttribute.WA_OpaquePaintEvent, True)
         self.setMinimumSize(640, 480)
+        self.player: mpv.MPV | None = None
+        self._pending_url: str | None = None
 
-        # Keep the ctypes callback alive for the entire lifetime of the GL context.
-        self._proc_addr_fn = mpv.MpvGlGetProcAddressFn(self._get_proc_address)
+    def _ensure_player(self) -> bool:
+        if self.player is not None:
+            return True
+
+        wid = int(self.winId())
+        if not wid:
+            return False
+
+        _force_numeric_c_locale()
 
         self.player = mpv.MPV(
-            vo="libmpv",               # Embeddable renderer (not a standalone window)
-
-            # ---- low-latency flags ----------------------------------------
-            cache=False,               # Disable demuxer cache  (-fflags nobuffer)
+            wid=str(wid),
+            vo="gpu",
+            cache=False,
             cache_pause=False,
             demuxer_max_bytes="128KiB",
             demuxer_readahead_secs=0,
-            vd_lavc_threads=1,         # Single decode thread reduces queue depth
-            framedrop="vo",            # Drop to keep real-time (-framedrop)
-            video_sync="desync",       # Don't wait for audio clock (setpts=0 equiv)
+            vd_lavc_threads=1,
+            framedrop="vo",
+            video_sync="desync",
+            profile='low-latency',
+            untimed=True,
+            hwdec='auto',
         )
+        return True
 
-        self._render_ctx: mpv.MpvRenderContext | None = None
-
-    # ------------------------------------------------------------------
-    # OpenGL proc-address callback (called by libmpv during init)
-    # ------------------------------------------------------------------
-
-    def _get_proc_address(self, _ctx: object, name: bytes) -> int:
-        ctx = QOpenGLContext.currentContext()
-        if ctx is None:
-            return 0
-        addr = ctx.getProcAddress(name)
-        # getProcAddress returns an int on PyQt6; wrap safely.
-        try:
-            return ctypes.cast(int(addr), ctypes.c_void_p).value or 0
-        except (TypeError, ctypes.ArgumentError):
-            return 0
-
-    # ------------------------------------------------------------------
-    # Qt OpenGL lifecycle
-    # ------------------------------------------------------------------
-
-    def _schedule_update(self) -> None:
-        """Called from mpv's render thread. Marshals to the Qt main thread."""
-        QMetaObject.invokeMethod(self, "update", Qt.ConnectionType.QueuedConnection)
-
-    def initializeGL(self) -> None:
-        self._render_ctx = mpv.MpvRenderContext(
-            self.player,
-            "opengl",
-            opengl_init_params={"get_proc_address": self._proc_addr_fn},
-        )
-        # update_cb fires from mpv's render thread — must marshal to main thread.
-        self._render_ctx.update_cb = self._schedule_update
-
-    def paintGL(self) -> None:
-        if self._render_ctx is None:
-            return
-        ratio = self.devicePixelRatio()
-        self._render_ctx.render(
-            flip_y=True,
-            opengl_fbo={
-                "fbo": self.defaultFramebufferObject(),
-                "w":   int(self.width()  * ratio),
-                "h":   int(self.height() * ratio),
-            },
-        )
-
-    def resizeGL(self, _w: int, _h: int) -> None:
-        # mpv reads fbo dimensions from paintGL on every frame — nothing to do.
-        pass
+    def showEvent(self, event) -> None:
+        super().showEvent(event)
+        if self._ensure_player() and self._pending_url:
+            self.player.play(self._pending_url)
+            self._pending_url = None
 
     # ------------------------------------------------------------------
     # Stream control
     # ------------------------------------------------------------------
 
     def play(self, url: str) -> None:
-        self.player.play(url)
+        self._pending_url = url
+        if self._ensure_player() and self.player is not None:
+            self.player.play(url)
+            self._pending_url = None
 
     def stop(self) -> None:
-        self.player.command("stop")
+        if self.player is not None:
+            self.player.command("stop")
 
     # ------------------------------------------------------------------
     # Cleanup
     # ------------------------------------------------------------------
 
     def closeEvent(self, event) -> None:
-        # Order matters to avoid a segfault:
-        # 1. Stop playback so mpv's render thread goes idle.
-        # 2. Free the render context (detaches from the GL context).
-        # 3. Terminate the mpv core.
-        # 4. Only then let Qt destroy the GL widget.
         self.stop()
-        self.player.wait_for_shutdown()
-        if self._render_ctx is not None:
-            self._render_ctx.free()
-            self._render_ctx = None
-        self.player.terminate()
+        if self.player is not None:
+            self.player.wait_for_shutdown()
+            self.player.terminate()
+            self.player = None
         event.accept()
