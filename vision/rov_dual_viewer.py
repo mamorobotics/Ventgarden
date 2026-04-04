@@ -24,7 +24,7 @@ Layout:
     └──────────────────────────────────────────────────┘
 
 Requirements:
-    pip install python-mpv PyQt6
+    pip install python-mpv PySide6
     macOS:  brew install mpv
     Linux:  sudo apt install libmpv-dev
 
@@ -46,12 +46,12 @@ _libc = ctypes.CDLL(ctypes.util.find_library("c"), use_errno=True)
 _libc.setlocale.restype = ctypes.c_char_p
 _libc.setlocale(locale.LC_NUMERIC, b"C")
 
-from PyQt6.QtWidgets import (
+from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget,
     QVBoxLayout, QHBoxLayout,
     QPushButton, QLineEdit, QLabel, QStatusBar,
 )
-from PyQt6.QtCore import Qt, QTimer
+from PySide6.QtCore import Qt, QTimer
 
 # Import the MpvWidget from your existing rov_viewer.py (same directory).
 from mpv_viewer import MpvWidget
@@ -60,9 +60,9 @@ from mpv_viewer import MpvWidget
 # Defaults
 # ---------------------------------------------------------------------------
 
-DEFAULT_IP    = "192.168.1.100"
+DEFAULT_IP    = "192.168.1.2"
 DEFAULT_PORT1 = 8080
-DEFAULT_PORT2 = 8081
+DEFAULT_PORT2 = 5050
 STREAM_PATH   = "/stream"   # change to e.g. "/?action=stream" if needed
 
 
