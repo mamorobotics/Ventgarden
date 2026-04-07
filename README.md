@@ -32,3 +32,4 @@ You should be ready to run the relevant python files!
 - [ ] Add 2 camera functionality (side by side, switch between cameras on the main viewer, implement throtlling for dual camera vision).
 - [ ] Implement still capture / video capture
 - [ ] Float control + data
+- [ ] Add video recording feature
