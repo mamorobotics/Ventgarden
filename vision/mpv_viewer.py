@@ -95,6 +95,9 @@ def _force_numeric_c_locale() -> None:
 
 _configure_runtime_locale()
 
+import ctypes, ctypes.util, os
+os.environ["DYLD_LIBRARY_PATH"] = "/opt/homebrew/lib"
+
 import mpv
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QWidget
@@ -135,7 +138,7 @@ class MpvWidget(QWidget):
         _force_numeric_c_locale()
 
         self.player = mpv.MPV(
-            wid=str(wid),
+            wid=wid,
             vo="gpu",
             cache=False,
             cache_pause=False,
@@ -147,6 +150,7 @@ class MpvWidget(QWidget):
             profile='low-latency',
             untimed=True,
             hwdec='auto',
+            force_window=True,
         )
         return True
 
