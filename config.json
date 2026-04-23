@@ -17,10 +17,10 @@
             "rtrigger": 5
         },
         "button_map": {
-            "x": 0,
-            "a": 1,
-            "b": 2,
-            "y": 3,
+            "x": 2,
+            "a": 0,
+            "b": 1,
+            "y": 3, 
             "lbumper": 4,
             "rbumper": 5,
             "up": 11,
