@@ -142,6 +142,7 @@ class GameController:
         except pygame.error:
             return 0
 
+    ## Misha edit --> reads D-pad from hat input instead of buttons, since my controller (PS4) reports D-pad as hat, not buttons
     def _get_dpad_from_hat(self) -> tuple[int, int, int, int]:
         """
         Read D-pad from hat input (POV).
