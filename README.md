@@ -33,3 +33,4 @@ You should be ready to run the relevant python files!
 - [ ] Implement still capture / video capture
 - [ ] Float control + data
 - [ ] Add video recording feature
+- [ ] Add still photo capture feature (capture a series of pictures, and a button to open the folder where the stills were saved)
