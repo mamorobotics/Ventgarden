@@ -41,10 +41,10 @@ import locale
 import argparse
 
 # Fix libmpv float parsing before the library loads (some languages use "," instead of "." as decimal point, lib_mpv required American styled)
-# os.environ["LC_NUMERIC"] = "C"
-# _libc = ctypes.CDLL(ctypes.util.find_library("c"), use_errno=True)
-# _libc.setlocale.restype = ctypes.c_char_p
-# _libc.setlocale(locale.LC_NUMERIC, b"C")
+os.environ["LC_NUMERIC"] = "C"
+_libc = ctypes.CDLL(ctypes.util.find_library("c"), use_errno=True)
+_libc.setlocale.restype = ctypes.c_char_p
+_libc.setlocale(locale.LC_NUMERIC, b"C")
 
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget,

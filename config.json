@@ -1,6 +1,6 @@
 {
     "serial": {
-        "port": "/dev/cu.usbserial-1110",
+        "port": "/dev/ttyUSB0",
         "baud_rate": 31250,
         "timeout": 0
     },
