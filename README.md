@@ -24,15 +24,15 @@ Then, activate the environment `conda activate VentgardenENV`
 You should be ready to run the relevant python files!
 
 ## Todo
-- [ ] Implement config.json
-- [ ] More debugging details on the controller / serial bridge
-- [ ] Uncomment lx and ly values in controllervalues for send partial string (i bypassed this bc my controller has drift)
-- [ ] **(IMPORTANT)** Write a simple python script which can detect when the ustreamer server on the bot side is not available / has disconnected, and logs it to a file / the command line. Basically, we have had issues with the ethernet connection disconnecting / crashing, and I think I have fixed it, but we need to be sure. 
+- [X] Implement config.json
+- [X] More debugging details on the controller / serial bridge
+- [X] Uncomment lx and ly values in controllervalues for send partial string (i bypassed this bc my controller has drift)
+- [X] **(IMPORTANT)** Write a simple python script which can detect when the ustreamer server on the bot side is not available / has disconnected, and logs it to a file / the command line. Basically, we have had issues with the ethernet connection disconnecting / crashing, and I think I have fixed it, but we need to be sure. 
 - [ ] Migrate from sending controller data to just PWM signals (see Arduino-Control repo and the control folder for more info)
-- [ ] Add 2 camera functionality (side by side, switch between cameras on the main viewer, implement throtlling for dual camera vision).
-- [ ] Implement still capture / video capture
+- [X] Add 2 camera functionality (side by side, switch between cameras on the main viewer, implement throtlling for dual camera vision).
+- [X] Implement video capture
 - [ ] Float control + data
-- [ ] Add video recording feature
+- [X] Add video recording feature
 - [ ] Add still photo capture feature (capture a series of pictures, and a button to open the folder where the stills were saved)
 - [ ] Control UI
     - [ ] Section to display and graph float data
