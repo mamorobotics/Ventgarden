@@ -11,9 +11,9 @@
         "axis_map": {
             "ljoyx": 0,
             "ljoyy": 1,
-            "rjoyx": 2,
-            "rjoyy": 3,
-            "ltrigger": 4,
+            "rjoyx": 3,
+            "rjoyy": 4,
+            "ltrigger": 2, 
             "rtrigger": 5
         },
         "button_map": {
