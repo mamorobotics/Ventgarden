@@ -34,3 +34,6 @@ You should be ready to run the relevant python files!
 - [ ] Float control + data
 - [ ] Add video recording feature
 - [ ] Add still photo capture feature (capture a series of pictures, and a button to open the folder where the stills were saved)
+- [ ] Control UI
+    - [ ] Section to display and graph float data
+    - [ ] Section to visually show control inputs (joystick numbers, button presses, etc). When there is a control input, make that box / field visually a different color (like green or red) so it sticks out. 

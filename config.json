@@ -6,7 +6,7 @@
     },
     "controller": {
         "id": 0,
-        "deadzone": 0.05,
+        "deadzone": 0.07,
         "send_interval_ms": 70,
         "axis_map": {
             "ljoyx": 0,
