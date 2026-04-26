@@ -40,11 +40,11 @@ import ctypes.util
 import locale
 import argparse
 
-# Fix libmpv float parsing before the library loads.
-os.environ["LC_NUMERIC"] = "C"
-_libc = ctypes.CDLL(ctypes.util.find_library("c"), use_errno=True)
-_libc.setlocale.restype = ctypes.c_char_p
-_libc.setlocale(locale.LC_NUMERIC, b"C")
+# Fix libmpv float parsing before the library loads (some languages use "," instead of "." as decimal point, lib_mpv required American styled)
+# os.environ["LC_NUMERIC"] = "C"
+# _libc = ctypes.CDLL(ctypes.util.find_library("c"), use_errno=True)
+# _libc.setlocale.restype = ctypes.c_char_p
+# _libc.setlocale(locale.LC_NUMERIC, b"C")
 
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget,
@@ -61,8 +61,8 @@ from mpv_viewer import MpvWidget
 # ---------------------------------------------------------------------------
 
 DEFAULT_IP    = "192.168.1.2"
-DEFAULT_PORT1 = 8080
-DEFAULT_PORT2 = 5050
+DEFAULT_PORT1 = 8081
+DEFAULT_PORT2 = 5051
 STREAM_PATH   = "/stream"   # change to e.g. "/?action=stream" if needed
 
 
@@ -79,7 +79,7 @@ class CameraPanel(QWidget):
     """
 
     def __init__(self, title: str, parent=None) -> None:
-        super().__init__(parent)
+        super().__init__(parent) ##calls attributes of parent class QWidget for this class CameraPanel to inherit from it.
         self._title         = title
         self._current_url   = ""
         self._stream_active = False
@@ -89,7 +89,7 @@ class CameraPanel(QWidget):
 
         # ---- Status label ------------------------------------------------
         self._status = QLabel("Disconnected")
-        self._status.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._status.setAlignment(Qt.AlignmentFlag.AlignCenter)  #This line sets the alignment of the text within the QLabel widget to be centered both horizontally and vertically. 
         self._status.setStyleSheet("color: #888; font-size: 12px; padding: 2px;")
 
         # ---- Per-panel buttons -------------------------------------------
@@ -100,8 +100,8 @@ class CameraPanel(QWidget):
         self._connect_btn.clicked.connect(self._on_connect_clicked)
         self._disconnect_btn.clicked.connect(self.disconnect)
 
-        btn_row = QHBoxLayout()
-        btn_row.addWidget(self._connect_btn)
+        btn_row = QHBoxLayout() ##QHBoxLayout() is a layout manager that arranges widgets horizontally. When you create an instance of QHBoxLayout(), it starts as an empty layout with no widgets in it. You can then add widgets to this layout using the addWidget() method, and it will automatically arrange them in a horizontal row. In this code, btn_row is an instance of QHBoxLayout that will hold the Connect and Disconnect buttons side by side.
+        btn_row.addWidget(self._connect_btn) 
         btn_row.addWidget(self._disconnect_btn)
 
         # ---- Title label -------------------------------------------------
@@ -229,7 +229,10 @@ class ROVDualViewer(QMainWindow):
     def __init__(self, ip: str, port1: int, port2: int) -> None:
         super().__init__()
         self.setWindowTitle("ROV Dual Camera Viewer")
+        self._camera_mode = "Dual"  # changes to "Single Cam 1" or "Single Cam 2" if user disconnects one panel manually
 
+        #-----This code below defines the dual interface. The toggling gets defined later in slots section.
+        
         # ---- Camera panels ----------------------------------------------
         self._cam1 = CameraPanel("Camera 1")
         self._cam2 = CameraPanel("Camera 2")
@@ -240,14 +243,15 @@ class ROVDualViewer(QMainWindow):
         cam_row.addWidget(self._cam2)
 
         # ---- Shared controls bar ----------------------------------------
-        self._ip_edit    = QLineEdit(ip)
-        self._port1_edit = QLineEdit(str(port1))
-        self._port2_edit = QLineEdit(str(port2))
-
+        self._ip_edit    = QLineEdit(ip) #generic
+        self._port1_edit = QLineEdit(str(port1)) #specific to cam1
+        self._port2_edit = QLineEdit(str(port2)) #specific to cam2
+        
         for widget, placeholder in (
             (self._ip_edit,    "192.168.x.x"),
             (self._port1_edit, "8080"),
-            (self._port2_edit, "8081"),
+            (self._port2_edit, "8081")
+            
         ):
             widget.setMaximumWidth(130)
             widget.setPlaceholderText(placeholder)
@@ -262,6 +266,17 @@ class ROVDualViewer(QMainWindow):
 
         self._connect_all_btn.clicked.connect(self._on_connect_all)
         self._disconnect_all_btn.clicked.connect(self._on_disconnect_all)
+        
+
+        ##----Misha edit: added toggle buttons for single cam view modes, not implemented yet
+        self._toggle_view_cam1_btn = QPushButton("Toggle View - Cam 1")
+        self._toggle_view_cam2_btn = QPushButton("Toggle View - Cam 2")
+        self._toggle_view_dual_btn = QPushButton("Toggle View - Dual")
+
+        self._toggle_view_cam1_btn.clicked.connect(self._toggle_view_cam1)
+        self._toggle_view_cam2_btn.clicked.connect(self._toggle_view_cam2)
+        self._toggle_view_dual_btn.clicked.connect(self._toggle_view_dual)
+        ###---End misha edit
 
         controls = QHBoxLayout()
         controls.addWidget(QLabel("ROV IP:"))
@@ -277,6 +292,18 @@ class ROVDualViewer(QMainWindow):
         controls.addWidget(self._disconnect_all_btn)
         controls.addStretch()
 
+        toggle = QHBoxLayout()
+        toggle.addWidget(self._toggle_view_cam1_btn)
+        toggle.addSpacing(16)
+        toggle.addWidget(self._toggle_view_cam2_btn)
+        toggle.addSpacing(16)
+        toggle.addWidget(self._toggle_view_dual_btn)
+        toggle.addStretch()
+        
+        ##for start, hide dual button
+        self._toggle_view_dual_btn.setVisible(False)
+        
+
         # ---- Root layout ------------------------------------------------
         central = QWidget()
         root = QVBoxLayout(central)
@@ -284,6 +311,7 @@ class ROVDualViewer(QMainWindow):
         root.setSpacing(6)
         root.addLayout(cam_row, stretch=1)
         root.addLayout(controls)
+        root.addLayout(toggle)
         self.setCentralWidget(central)
 
         # ---- Status bar -------------------------------------------------
@@ -311,6 +339,78 @@ class ROVDualViewer(QMainWindow):
     # ------------------------------------------------------------------
     # Slots
     # ------------------------------------------------------------------
+
+    def _toggle_view_cam1(self) -> None:
+        self._camera_mode = "Single Cam 1"
+        self._toggle_view_mode()
+
+    def _toggle_view_cam2(self) -> None:
+        self._camera_mode = "Single Cam 2"
+        self._toggle_view_mode()
+    
+    def _toggle_view_dual(self) -> None:
+        self._camera_mode = "Dual"
+        self._toggle_view_mode()
+
+    def _toggle_view_mode(self) -> None:
+        if self._camera_mode == "Single Cam 1":
+            # Show only camera 1
+            self._cam1.setVisible(True)
+            self._cam1.setEnabled(True)
+            self._cam2.setVisible(False)
+            self._cam2.setEnabled(False)
+
+            # Hide port 2 and dual buttons
+            self._port2_edit.setVisible(False)
+            self._connect_all_btn.setVisible(False)
+            self._disconnect_all_btn.setVisible(False)
+            
+            # Show dual and cam2 toggle button to allow switching back to dual and cam2 view
+            self._toggle_view_dual_btn.setVisible(True)  # show dual toggle when in cam1 view
+            self._toggle_view_cam2_btn.setVisible(True)  # show cam2 toggle when in cam1 view
+            self.resize(640, 600)
+            self._status_bar.showMessage("Single View - Camera 1")
+
+
+        elif self._camera_mode == "Single Cam 2":
+            # Show only camera 2
+            self._cam1.setVisible(False)
+            self._cam1.setEnabled(False)
+            self._cam2.setVisible(True)
+            self._cam2.setEnabled(True)
+        
+            # Hide port 1 and dual buttons
+            self._port1_edit.setVisible(False)
+            self._connect_all_btn.setVisible(False)
+            self._disconnect_all_btn.setVisible(False)   
+            
+            # Show dual and cam1 toggle button to allow switching back to dual and cam2 view
+            self._toggle_view_dual_btn.setVisible(True)  # show dual toggle when in cam2 view
+            self._toggle_view_cam1_btn.setVisible(True)  # show cam1 toggle when in cam2 view
+            
+            self.resize(640, 600)
+            self._status_bar.showMessage("Single View - Camera 2")
+
+        elif self._camera_mode == "Dual":
+            # Show both cameras
+            self._cam1.setVisible(True)
+            self._cam1.setEnabled(True)
+            self._cam2.setVisible(True)
+            self._cam2.setEnabled(True)
+            
+            # Show port 2 and dual buttons
+            self._port1_edit.setVisible(True)
+            self._port2_edit.setVisible(True)
+            self._connect_all_btn.setVisible(True)
+            self._disconnect_all_btn.setVisible(True)
+            
+            # Show cam2 and cam1 toggle button to allow switching back to cam2 and cam1 view
+            self._toggle_view_cam1_btn.setVisible(True)  # show cam1 toggle when in dual  view
+            self._toggle_view_cam2_btn.setVisible(True)  # show cam2 toggle when in dual view
+
+            self.resize(1280, 600)
+            self._status_bar.showMessage("Dual View")
+
 
     def _on_connect_all(self) -> None:
         url1, url2 = self._build_urls()

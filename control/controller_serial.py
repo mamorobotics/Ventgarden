@@ -54,12 +54,14 @@ class ControllerValues:
                     j k      =  left / right bumper
                     u d l r  =  D-pad up / down / left / right
         """
-        lx = 0# max(-999, min(999, int(self.ljoyx * 1000)))
-        ly = 0# max(-999, min(999, int(self.ljoyy * 1000))) CHANGE THIS LATER PLEASE - bypassed this and lx bc my controller has joystick drift
+        lx = max(-999, min(999, int(self.ljoyx * 1000)))
+        ly = max(-999, min(999, int(self.ljoyy * 1000))) # I did CHANGE THIS #####LATER PLEASE - bypassed this and lx bc my controller has joystick drift
         rx = max(-999, min(999, int(self.rjoyx * 1000)))
         ry = max(-999, min(999, int(self.rjoyy * 1000)))
         lt = max(0, min(99, round(self.ltrigger * 100)))
         rt = max(0, min(99, round(self.rtrigger * 100)))
+        
+
 
         s = f"{lx}!{ly}!{rx}!{ry}!{lt}!{rt}"
 
@@ -140,6 +142,25 @@ class GameController:
         except pygame.error:
             return 0
 
+    ## Misha edit --> reads D-pad from hat input instead of buttons, since my controller (PS4) reports D-pad as hat, not buttons
+    def _get_dpad_from_hat(self) -> tuple[int, int, int, int]:
+        """
+        Read D-pad from hat input (POV).
+        Returns (up, down, left, right) as 0 or 1.
+        Hat values: (x, y) where x=[-1,0,1], y=[-1,0,1]
+        """
+        if self.joystick is None or self.joystick.get_numhats() == 0:
+            return (0, 0, 0, 0)
+        try:
+            x, y = self.joystick.get_hat(0)
+            up = 1 if y > 0 else 0
+            down = 1 if y < 0 else 0
+            left = 1 if x < 0 else 0
+            right = 1 if x > 0 else 0
+            return (up, down, left, right)
+        except pygame.error:
+            return (0, 0, 0, 0)
+
     @staticmethod
     def _normalize_trigger(val: float) -> float:
         """
@@ -174,10 +195,9 @@ class GameController:
         cv.y       = self._button("y")
         cv.lbumper = self._button("lbumper")
         cv.rbumper = self._button("rbumper")
-        cv.up      = self._button("up")
-        cv.down    = self._button("down")
-        cv.left    = self._button("left")
-        cv.right   = self._button("right")
+        
+        # Read D-pad from hat input
+        cv.up, cv.down, cv.left, cv.right = self._get_dpad_from_hat()
 
         return cv
 
