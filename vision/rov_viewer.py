@@ -105,6 +105,7 @@ class ROVViewer(QMainWindow):
         self.setWindowTitle("ROV Camera Viewer")
         self._current_url = initial_url
         self._stream_active = False
+        self._idle_observer_registered = False
 
         # ---- Video widget ------------------------------------------------
         self._video = MpvWidget(self)
@@ -166,8 +167,13 @@ class ROVViewer(QMainWindow):
         self._connect_btn.setEnabled(False)
         self._disconnect_btn.setEnabled(True)
         self._status.showMessage(f"Connecting → {url}")
+        self._register_idle_observer()
 
-        # Watch mpv's idle property to update the status bar.
+    def _register_idle_observer(self) -> None:
+        """Watch mpv's idle property to update the status bar once."""
+        if self._idle_observer_registered or self._video.player is None:
+            return
+
         @self._video.player.property_observer("idle-active")
         def _on_idle(name, idle):     # noqa: ARG001
             if not self._stream_active:
@@ -176,6 +182,8 @@ class ROVViewer(QMainWindow):
                 self._status.showMessage("⚠  Stream lost — reconnecting…")
             else:
                 self._status.showMessage(f"● Live: {self._current_url}")
+
+        self._idle_observer_registered = True
 
     def _on_disconnect(self) -> None:
         self._stream_active = False
@@ -197,6 +205,13 @@ class ROVViewer(QMainWindow):
 
         if idle:
             self._video.play(self._current_url)
+            self._register_idle_observer()
+
+    def closeEvent(self, event) -> None:
+        self._stream_active = False
+        self._heartbeat.stop()
+        self._video.shutdown()
+        event.accept()
 
 
 # ---------------------------------------------------------------------------

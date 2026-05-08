@@ -20,12 +20,11 @@ Usage:
     python rov_viewer.py http://192.168.1.50:8080/stream
 """
 
-import sys
 import os
 import ctypes
 import ctypes.util
 import locale
-import argparse
+import platform
 import subprocess
 
 def _configure_runtime_locale() -> None:
@@ -93,27 +92,45 @@ def _force_numeric_c_locale() -> None:
     libc.setlocale(locale.LC_NUMERIC, b"C")
 
 
-_configure_runtime_locale()
+def _configure_mpv_library_path() -> None:
+    """Help python-mpv find Homebrew's libmpv on macOS."""
+    if platform.system() != "Darwin":
+        return
 
-import ctypes, ctypes.util, os
-os.environ["DYLD_LIBRARY_PATH"] = "/opt/homebrew/lib"
+    for brew_lib in ("/opt/homebrew/lib", "/usr/local/lib"):
+        if os.path.exists(os.path.join(brew_lib, "libmpv.dylib")):
+            current = os.environ.get("DYLD_LIBRARY_PATH", "")
+            paths = [path for path in current.split(os.pathsep) if path]
+            if brew_lib not in paths:
+                os.environ["DYLD_LIBRARY_PATH"] = os.pathsep.join([brew_lib, *paths])
+            return
+
+
+_configure_runtime_locale()
+_configure_mpv_library_path()
 
 import mpv
-from PySide6.QtCore import Qt
+from PySide6.QtCore import QObject, Signal
+from PySide6.QtGui import QOpenGLContext
+from PySide6.QtOpenGLWidgets import QOpenGLWidget
 from PySide6.QtWidgets import QWidget
 
 
+class _RenderUpdateBridge(QObject):
+    update_requested = Signal()
 
 
 # ---------------------------------------------------------------------------
 # Embedded mpv widget
 # ---------------------------------------------------------------------------
 
-class MpvWidget(QWidget):
+class MpvWidget(QOpenGLWidget):
     """
-    Hosts mpv directly inside a native QWidget using window-id embedding.
-    This is more robust on Linux systems where QOpenGLWidget may be
-    unavailable depending on Qt platform backend.
+    Renders mpv directly into Qt's OpenGL framebuffer.
+
+    This uses libmpv's render context instead of mpv's ``wid`` option. On
+    macOS, ``wid`` often creates a separate native mpv window; with this
+    widget Qt owns the surface and mpv draws into it.
 
     Low-latency mpv options mirror the recommended ffplay flags:
         -fflags nobuffer -flags low_delay -framedrop -vf setpts=0
@@ -121,25 +138,25 @@ class MpvWidget(QWidget):
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
-        self.setAttribute(Qt.WidgetAttribute.WA_NativeWindow, True)
-        self.setAttribute(Qt.WidgetAttribute.WA_OpaquePaintEvent, True)
         self.setMinimumSize(640, 480)
         self.player: mpv.MPV | None = None
+        self._render_context: mpv.MpvRenderContext | None = None
         self._pending_url: str | None = None
+        self._get_proc_address_cb = mpv.MpvGlGetProcAddressFn(self._get_proc_address)
+        self._update_bridge = _RenderUpdateBridge(self)
+        self._update_bridge.update_requested.connect(self.update)
 
     def _ensure_player(self) -> bool:
         if self.player is not None:
             return True
 
-        wid = int(self.winId())
-        if not wid:
+        if not self.context():
             return False
 
         _force_numeric_c_locale()
 
         self.player = mpv.MPV(
-            wid=wid,
-            vo="gpu",
+            vo="libmpv",
             cache=False,
             cache_pause=False,
             demuxer_max_bytes="128KiB",
@@ -147,18 +164,58 @@ class MpvWidget(QWidget):
             vd_lavc_threads=1,
             framedrop="vo",
             video_sync="desync",
-            profile='low-latency',
+            profile="low-latency",
             untimed=True,
-            hwdec='auto',
-            force_window=True,
+            hwdec="auto",
         )
+        self._render_context = mpv.MpvRenderContext(
+            self.player,
+            "opengl",
+            opengl_init_params={"get_proc_address": self._get_proc_address_cb},
+        )
+        self._render_context.update_cb = self._request_update
         return True
 
-    def showEvent(self, event) -> None:
-        super().showEvent(event)
+    def _get_proc_address(self, _ctx, name) -> int:
+        context = QOpenGLContext.currentContext()
+        if context is None:
+            return 0
+
+        address = context.getProcAddress(name)
+        if not address:
+            return 0
+
+        try:
+            return int(address)
+        except TypeError:
+            return int(ctypes.cast(address, ctypes.c_void_p).value or 0)
+
+    def _request_update(self) -> None:
+        self._update_bridge.update_requested.emit()
+
+    def initializeGL(self) -> None:
         if self._ensure_player() and self._pending_url:
             self.player.play(self._pending_url)
             self._pending_url = None
+
+    def paintGL(self) -> None:
+        if self._render_context is None:
+            return
+
+        self._render_context.update()
+        ratio = self.devicePixelRatioF()
+        width = int(self.width() * ratio)
+        height = int(self.height() * ratio)
+        self._render_context.render(
+            opengl_fbo={
+                "fbo": self.defaultFramebufferObject(),
+                "w": width,
+                "h": height,
+                "internal_format": 0,
+            },
+            flip_y=True,
+        )
+        self._render_context.report_swap()
 
     # ------------------------------------------------------------------
     # Stream control
@@ -174,14 +231,26 @@ class MpvWidget(QWidget):
         if self.player is not None:
             self.player.command("stop")
 
+    def shutdown(self) -> None:
+        if self._render_context is not None:
+            self.makeCurrent()
+            self._render_context.update_cb = None
+            self._render_context.free()
+            self._render_context = None
+            self.doneCurrent()
+
+        if self.player is None:
+            return
+
+        self.stop()
+        self.player.terminate()
+        self.player.wait_for_shutdown()
+        self.player = None
+
     # ------------------------------------------------------------------
     # Cleanup
     # ------------------------------------------------------------------
 
     def closeEvent(self, event) -> None:
-        self.stop()
-        if self.player is not None:
-            self.player.wait_for_shutdown()
-            self.player.terminate()
-            self.player = None
+        self.shutdown()
         event.accept()

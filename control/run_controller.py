@@ -10,9 +10,11 @@ Usage:
 import argparse
 import json
 import sys
+import os
 
 from controller_serial import ControllerSerialBridge
-
+BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+config_path = os.path.join(BASE_DIR, "config.json")
 
 def load_config(path: str) -> dict:
     try:
@@ -34,9 +36,12 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    config = load_config(args.config)
-    bridge = ControllerSerialBridge(config)
-    bridge.start()
+    if args.config == "config.json":
+        config = load_config(config_path)
+    else:
+        config = load_config(args.config)
+        bridge = ControllerSerialBridge(config)
+        bridge.start()
 
 
 if __name__ == "__main__":
