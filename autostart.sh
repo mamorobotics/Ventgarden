@@ -1,3 +1,4 @@
+source ~/miniconda3/etc/profile.d/conda.sh
 cd /home/mhsrobotics/Desktop/Ventgarden/
 conda init
 conda activate testVent
