@@ -83,6 +83,7 @@ class CameraPanel(QWidget):
         self._title         = title
         self._current_url   = ""
         self._stream_active = False
+        self._idle_observer_registered = False
 
         # ---- Video -------------------------------------------------------
         self._video = MpvWidget(self)
@@ -150,8 +151,13 @@ class CameraPanel(QWidget):
         self._connect_btn.setEnabled(False)
         self._disconnect_btn.setEnabled(True)
         self._set_status(f"Connecting → {url}")
+        self._register_idle_observer()
 
-        # Property observer for live/lost feedback.
+    def _register_idle_observer(self) -> None:
+        """Register the mpv live/lost feedback callback once per panel."""
+        if self._idle_observer_registered or self._video.player is None:
+            return
+
         @self._video.player.property_observer("idle-active")
         def _on_idle(name, idle):   # noqa: ARG001
             if not self._stream_active:
@@ -160,6 +166,8 @@ class CameraPanel(QWidget):
                 self._set_status("⚠  Stream lost — reconnecting…", error=True)
             else:
                 self._set_status(f"● Live: {self._current_url}", live=True)
+
+        self._idle_observer_registered = True
 
     def disconnect(self) -> None:
         """Stop streaming and reset UI."""
@@ -200,17 +208,20 @@ class CameraPanel(QWidget):
 
         if idle:
             self._video.play(self._current_url)
+            self._register_idle_observer()
 
     # ------------------------------------------------------------------
     # Forward close event so MpvWidget can clean up safely
     # ------------------------------------------------------------------
 
-    def closeEvent(self, event) -> None:
+    def shutdown(self) -> None:
         self._stream_active = False
         self._heartbeat.stop()
-        # Delegate to MpvWidget's closeEvent which handles the safe
-        # mpv shutdown sequence (stop → wait → free ctx → terminate).
-        self._video.closeEvent(event)
+        self._video.shutdown()
+
+    def closeEvent(self, event) -> None:
+        self.shutdown()
+        event.accept()
 
 
 # ---------------------------------------------------------------------------
@@ -434,8 +445,8 @@ class ROVDualViewer(QMainWindow):
     # ------------------------------------------------------------------
 
     def closeEvent(self, event) -> None:
-        self._cam1.closeEvent(event)
-        self._cam2.closeEvent(event)
+        self._cam1.shutdown()
+        self._cam2.shutdown()
         super().closeEvent(event)
 
 
