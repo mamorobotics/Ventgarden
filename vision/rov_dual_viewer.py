@@ -61,8 +61,8 @@ from mpv_viewer import MpvWidget
 # ---------------------------------------------------------------------------
 
 DEFAULT_IP    = "192.168.1.2"
-DEFAULT_PORT1 = 8081
-DEFAULT_PORT2 = 5051
+DEFAULT_PORT1 = 8080
+DEFAULT_PORT2 = 5050
 STREAM_PATH   = "/stream"   # change to e.g. "/?action=stream" if needed
 
 
