@@ -1,4 +1,4 @@
-cd /home/mamorobotics/Desktop/Ventgarden/
+cd /home/mhsrobotics/Desktop/Ventgarden/
 conda init
 conda activate testVent
 python vision/rov_dual_viewer.py &
