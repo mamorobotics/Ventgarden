@@ -1,6 +1,6 @@
 """
-rov_dual_viewer.py
-------------------
+rov_dual_viewer_x_recorder.py
+------------------------------
 ROV Camera Viewer + Recorder — combined dual camera edition.
 
 Both cameras share the same IP address but stream on different ports.
@@ -9,7 +9,7 @@ Each camera panel has its own:
   • Live status label + auto-reconnect heartbeat
   • Connect / Disconnect buttons
   • ● Record / ■ Stop buttons with elapsed timer
-  • Output filename display
+  • Output filename display + ▶ Open button after save
 
 A shared controls bar at the bottom holds:
   • ROV IP and per-camera port fields
@@ -34,13 +34,13 @@ Layout:
     └──────────────────────────────────────────────────────────────┘
 
 Requirements:
-    pip install python-mpv PyQt6
+    pip install python-mpv PySide6
     macOS:  brew install mpv ffmpeg
     Linux:  sudo apt install libmpv-dev ffmpeg
 
 Usage:
-    python rov_dual_viewer.py
-    python rov_dual_viewer.py --ip 192.168.1.50 --port1 8080 --port2 8081
+    python rov_dual_viewer_x_recorder.py
+    python rov_dual_viewer_x_recorder.py --ip 192.168.1.50 --port1 8080 --port2 8081
 """
 
 import sys
@@ -59,14 +59,14 @@ _libc = ctypes.CDLL(ctypes.util.find_library("c"), use_errno=True)
 _libc.setlocale.restype = ctypes.c_char_p
 _libc.setlocale(locale.LC_NUMERIC, b"C")
 
-from PyQt6.QtWidgets import (
+from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget,
     QVBoxLayout, QHBoxLayout, QGridLayout,
     QPushButton, QLineEdit, QLabel, QStatusBar,
     QFileDialog, QFrame,
 )
-from PyQt6.QtCore import Qt, QTimer, QThread, pyqtSignal
-from PyQt6.QtGui import QFont
+from PySide6.QtCore import Qt, QTimer, QThread, Signal, QUrl
+from PySide6.QtGui import QFont, QDesktopServices
 
 from mpv_viewer import MpvWidget
 
@@ -79,7 +79,10 @@ DEFAULT_IP    = "192.168.1.100"
 DEFAULT_PORT1 = 8080
 DEFAULT_PORT2 = 8081
 STREAM_PATH   = "/stream"
-DEFAULT_SAVE  = str(Path.home() / "Videos")
+
+# Use the current working directory as the default save location so it always
+# exists and is writable regardless of the OS / user profile layout.
+DEFAULT_SAVE  = str(Path.cwd() / "recordings")
 
 
 # ---------------------------------------------------------------------------
@@ -87,11 +90,32 @@ DEFAULT_SAVE  = str(Path.home() / "Videos")
 # ---------------------------------------------------------------------------
 
 class RecordingWorker(QThread):
-    """Runs FFmpeg in a background thread to record an MJPEG stream to MP4."""
+    """
+    Runs FFmpeg in a background thread to record an MJPEG stream to MP4.
 
-    status_changed = pyqtSignal(str)
-    error_occurred = pyqtSignal(str)
-    finished       = pyqtSignal()
+    Key FFmpeg flags for MJPEG streams
+    ------------------------------------
+    -use_wallclock_as_timestamps 1
+        MJPEG streams from cheap cameras often carry no DTS/PTS timestamps.
+        Without this flag FFmpeg calculates duration from the *number of
+        frames* it has buffered, which makes a 5-second clip appear as a
+        46-second file (because the internal frame counter runs at a
+        different rate than wall time).  Forcing wall-clock timestamps makes
+        the output duration match real elapsed time.
+
+    -r 30
+        Explicitly tells FFmpeg to expect (and emit) 30 fps.  Remove or
+        adjust if your camera runs at a different frame rate.
+
+    -vsync cfr
+        Constant-frame-rate output — prevents duplicate/dropped frames from
+        causing choppiness in the saved file.
+    """
+
+    status_changed = Signal(str)
+    error_occurred = Signal(str)
+    finished_ok    = Signal(str)   # emits the output path on clean finish
+    finished       = Signal()
 
     def __init__(self, url: str, output_path: str, parent=None) -> None:
         super().__init__(parent)
@@ -103,14 +127,22 @@ class RecordingWorker(QThread):
     def run(self) -> None:
         cmd = [
             "ffmpeg", "-y",
-            "-fflags", "nobuffer",
+
+            # ---- Input timing fix for timestamp-free MJPEG streams ----
+            "-use_wallclock_as_timestamps", "1",
+            "-fflags", "nobuffer+genpts",
             "-flags",  "low_delay",
-            "-i",      self.url,
-            "-c:v",    "libx264",
+
+            "-i", self.url,
+
+            # ---- Output encoding ----------------------------------------
+            "-r",    "30",          # match your camera's actual frame rate
+            "-vsync", "cfr",        # constant-frame-rate muxing
+            "-c:v",  "libx264",
             "-preset", "ultrafast",
-            "-crf",    "23",
+            "-crf",  "23",
             "-movflags", "+faststart",
-            "-an",
+            "-an",                  # no audio
             self.output_path,
         ]
         try:
@@ -125,6 +157,9 @@ class RecordingWorker(QThread):
 
             if self._stop_requested:
                 self.status_changed.emit("Stopped")
+                # Only emit finished_ok if the file was actually written
+                if Path(self.output_path).exists() and Path(self.output_path).stat().st_size > 0:
+                    self.finished_ok.emit(self.output_path)
             elif self._process.returncode != 0:
                 err = self._process.stderr.read().decode(errors="replace")
                 self.error_occurred.emit(
@@ -132,6 +167,7 @@ class RecordingWorker(QThread):
                 )
             else:
                 self.status_changed.emit("Finished")
+                self.finished_ok.emit(self.output_path)
 
         except FileNotFoundError:
             self.error_occurred.emit(
@@ -147,13 +183,14 @@ class RecordingWorker(QThread):
     def stop(self) -> None:
         self._stop_requested = True
         if self._process and self._process.poll() is None:
+            # Send 'q' to ffmpeg's stdin for a clean, seekable file finish
             try:
                 self._process.stdin.write(b"q\n")
                 self._process.stdin.flush()
             except Exception:
                 pass
             try:
-                self._process.wait(timeout=3)
+                self._process.wait(timeout=5)
             except subprocess.TimeoutExpired:
                 self._process.kill()
 
@@ -178,6 +215,7 @@ class CameraPanel(QWidget):
         self._worker        = None
         self._elapsed       = 0
         self._save_dir      = DEFAULT_SAVE
+        self._last_save_path = ""
 
         # ==== VIEWER SECTION =============================================
 
@@ -216,6 +254,16 @@ class CameraPanel(QWidget):
         self._file_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self._file_lbl.setStyleSheet("color: #777; font-size: 10px;")
         self._file_lbl.setWordWrap(True)
+
+        # "Open file" button — hidden until a recording is saved
+        self._open_btn = QPushButton("▶  Open Video")
+        self._open_btn.setStyleSheet(
+            "QPushButton { background-color: #1565c0; color: white; "
+            "border-radius: 4px; padding: 3px 8px; font-size: 11px; }"
+            "QPushButton:hover { background-color: #1e88e5; }"
+        )
+        self._open_btn.setVisible(False)
+        self._open_btn.clicked.connect(self._open_saved_file)
 
         self._record_btn = QPushButton("● Record")
         self._record_btn.setStyleSheet(
@@ -262,6 +310,7 @@ class CameraPanel(QWidget):
         layout.addWidget(self._rec_status)
         layout.addWidget(self._duration_lbl)
         layout.addWidget(self._file_lbl)
+        layout.addWidget(self._open_btn)
         layout.addLayout(rec_btn_row)
 
         self.setStyleSheet(
@@ -326,13 +375,24 @@ class CameraPanel(QWidget):
             self._set_rec_status("No URL", error=True)
             return False
 
-        os.makedirs(save_dir, exist_ok=True)
+        # Ensure the save directory actually exists before we start
+        try:
+            os.makedirs(save_dir, exist_ok=True)
+        except OSError as e:
+            self._set_rec_status("Save dir error", error=True)
+            self._file_lbl.setText(str(e))
+            return False
+
         timestamp   = datetime.now().strftime("%Y%m%d_%H%M%S")
         output_path = os.path.join(save_dir, f"{self._prefix}_{timestamp}.mp4")
+
+        self._last_save_path = output_path
+        self._open_btn.setVisible(False)  # hide previous open button
 
         self._worker = RecordingWorker(url, output_path)
         self._worker.status_changed.connect(self._on_rec_status)
         self._worker.error_occurred.connect(self._on_rec_error)
+        self._worker.finished_ok.connect(self._on_rec_finished_ok)
         self._worker.finished.connect(self._on_rec_finished)
         self._worker.start()
 
@@ -402,27 +462,44 @@ class CameraPanel(QWidget):
         self._file_lbl.setText(msg[:80])
         self._rec_timer.stop()
 
+    def _on_rec_finished_ok(self, path: str) -> None:
+        """Called when FFmpeg exits cleanly (including after a user Stop)."""
+        self._last_save_path = path
+        self._set_rec_status("Saved ✓", live=True)
+        self._file_lbl.setText(Path(path).name)
+        self._open_btn.setVisible(True)
+
     def _on_rec_finished(self) -> None:
+        """Always called at end of recording, regardless of outcome."""
         self._record_btn.setEnabled(True)
         self._stop_rec_btn.setEnabled(False)
         self._rec_timer.stop()
-        if "Error" not in self._rec_status.text():
-            self._set_rec_status("Saved ✓", live=True)
 
     def _set_rec_status(self, msg: str, *, live=False, error=False) -> None:
         color = "#4caf50" if live else ("#ef5350" if error else "#888")
         self._rec_status.setStyleSheet(f"color: {color}; font-size: 11px;")
         self._rec_status.setText(msg)
 
+    def _open_saved_file(self) -> None:
+        """Open the saved video file in the system default player."""
+        if self._last_save_path and Path(self._last_save_path).exists():
+            QDesktopServices.openUrl(QUrl.fromLocalFile(self._last_save_path))
+        else:
+            self._file_lbl.setText("File not found — may still be writing")
+
     # ------------------------------------------------------------------
     # Cleanup
     # ------------------------------------------------------------------
 
-    def closeEvent(self, event) -> None:
+    def shutdown(self) -> None:
         self._stream_active = False
         self._heartbeat.stop()
         self.stop_recording()
-        self._video.closeEvent(event)
+        self._video.shutdown()
+
+    def closeEvent(self, event) -> None:
+        self.shutdown()
+        event.accept()
 
 
 # ---------------------------------------------------------------------------
@@ -466,6 +543,9 @@ class ROVDualViewer(QMainWindow):
         browse_btn = QPushButton("Browse…")
         browse_btn.setFixedWidth(75)
         browse_btn.clicked.connect(self._browse_save_dir)
+
+        # Sync save dir into panels whenever the field changes
+        self._save_edit.textChanged.connect(self._sync_save_dir)
 
         for field in (self._ip_edit, self._port1_edit, self._port2_edit):
             field.returnPressed.connect(self._on_connect_all)
@@ -532,11 +612,14 @@ class ROVDualViewer(QMainWindow):
         root.addLayout(stream_row)
         self.setCentralWidget(central)
 
+        # Initialise panels with the default save dir
+        self._sync_save_dir(DEFAULT_SAVE)
+
         # ---- Status bar -------------------------------------------------
         self._status_bar = QStatusBar()
         self.setStatusBar(self._status_bar)
         self._status_bar.showMessage(
-            "Ready — set IP and ports, then click ▶ Connect Both"
+            f"Ready — recordings will be saved to: {DEFAULT_SAVE}"
         )
 
         self.resize(1280, 700)
@@ -560,6 +643,11 @@ class ROVDualViewer(QMainWindow):
         )
         if path:
             self._save_edit.setText(path)
+
+    def _sync_save_dir(self, path: str) -> None:
+        """Push the current save-dir text into both camera panels."""
+        self._cam1.set_save_dir(path)
+        self._cam2.set_save_dir(path)
 
     # ------------------------------------------------------------------
     # Slots — streaming
@@ -612,8 +700,8 @@ class ROVDualViewer(QMainWindow):
     # ------------------------------------------------------------------
 
     def closeEvent(self, event) -> None:
-        self._cam1.closeEvent(event)
-        self._cam2.closeEvent(event)
+        self._cam1.shutdown()
+        self._cam2.shutdown()
         super().closeEvent(event)
 
 
@@ -632,7 +720,7 @@ def main() -> None:
     args = parser.parse_args()
 
     app = QApplication(sys.argv)
-    app.setApplicationName("ROV Dual Viewer")
+    app.setApplicationName("ROV Dual Viewer + Recorder")
 
     window = ROVDualViewer(ip=args.ip, port1=args.port1, port2=args.port2)
     window.show()
