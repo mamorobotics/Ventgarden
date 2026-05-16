@@ -9,6 +9,7 @@ Each camera panel has its own:
   • Live status label + auto-reconnect heartbeat
   • Connect / Disconnect buttons
   • ● Record / ■ Stop buttons with elapsed timer
+  • 📷 Snapshot button (fetches a still frame via ustreamer /snapshot)
   • Output filename display + ▶ Open button after save
 
 A shared controls bar at the bottom holds:
@@ -16,6 +17,7 @@ A shared controls bar at the bottom holds:
   • Save directory picker
   • ▶ Connect Both / ■ Disconnect Both
   • ● Record Both / ■ Stop Both
+  • 📷 Snapshot Both
 
 Layout:
     ┌──────────────────────────────────────────────────────────────┐
@@ -26,11 +28,11 @@ Layout:
     │  │  ──────────────────────────  │  │  ─────────────────── │ │
     │  │  ● Recording  00:12          │  │  ● Recording  00:12  │ │
     │  │  File: cam1_20250101_...mp4  │  │  File: cam2_...mp4   │ │
-    │  │  [● Record]  [■ Stop]        │  │  [● Record] [■ Stop] │ │
+    │  │  [● Record]  [■ Stop] [📷]   │  │ [● Record][■ Stop][📷]│ │
     │  └──────────────────────────────┘  └──────────────────────┘ │
     │  ROV IP:[___] Cam1:[__] Cam2:[__]  Save:[__________][Browse]│
     │  [▶ Connect Both] [■ Disconnect Both]                        │
-    │  [● Record Both]  [■ Stop Both]                              │
+    │  [● Record Both]  [■ Stop Both]  [📷 Snapshot Both]          │
     └──────────────────────────────────────────────────────────────┘
 
 Requirements:
@@ -53,6 +55,8 @@ import subprocess
 import threading
 from datetime import datetime
 from pathlib import Path
+from urllib.request import urlopen, Request
+from urllib.error import URLError
 
 # Fix libmpv float parsing before the library loads.
 os.environ["LC_NUMERIC"] = "C"
@@ -80,6 +84,7 @@ DEFAULT_IP    = "192.168.1.100"
 DEFAULT_PORT1 = 8080
 DEFAULT_PORT2 = 8081
 STREAM_PATH   = "/stream"
+SNAPSHOT_PATH = "/snapshot"   # ustreamer still-frame endpoint
 
 # Use the current working directory as the default save location so it always
 # exists and is writable regardless of the OS / user profile layout.
@@ -289,6 +294,63 @@ class RecordingWorker(QThread):
 
 
 # ---------------------------------------------------------------------------
+# Snapshot worker
+# ---------------------------------------------------------------------------
+
+class SnapshotWorker(QThread):
+    """
+    Fetches a single JPEG still frame from ustreamer's /snapshot endpoint
+    on a background thread and writes it to disk.
+
+    ustreamer serves the current frame as a raw JPEG at GET /snapshot.
+    We simply download the response body and write it to a .jpg file —
+    no additional libraries required beyond the stdlib urllib.
+
+    Signals
+    -------
+    finished_ok(path)  — emitted with the saved file path on success
+    error_occurred(msg) — emitted with a human-readable error on failure
+    """
+
+    finished_ok    = Signal(str)
+    error_occurred = Signal(str)
+
+    def __init__(self, snapshot_url: str, output_path: str, parent=None) -> None:
+        super().__init__(parent)
+        self._url         = snapshot_url
+        self._output_path = output_path
+
+    def run(self) -> None:
+        try:
+            req = Request(self._url, headers={"User-Agent": "ROV-Viewer/1.0"})
+            with urlopen(req, timeout=5) as resp:
+                data = resp.read()
+
+            if not data:
+                self.error_occurred.emit("Snapshot: empty response from camera")
+                return
+
+            # Validate it looks like a JPEG (starts with FF D8)
+            if not data[:2] == b"\xff\xd8":
+                self.error_occurred.emit(
+                    f"Snapshot: unexpected content type — "
+                    f"first bytes: {data[:4].hex()}"
+                )
+                return
+
+            os.makedirs(os.path.dirname(self._output_path), exist_ok=True)
+            Path(self._output_path).write_bytes(data)
+            self.finished_ok.emit(self._output_path)
+
+        except URLError as exc:
+            self.error_occurred.emit(f"Snapshot failed: {exc.reason}")
+        except OSError as exc:
+            self.error_occurred.emit(f"Snapshot save error: {exc}")
+        except Exception as exc:
+            self.error_occurred.emit(f"Snapshot error: {exc}")
+
+
+# ---------------------------------------------------------------------------
 # Combined camera panel (viewer + recorder)
 # ---------------------------------------------------------------------------
 
@@ -296,7 +358,8 @@ class CameraPanel(QWidget):
     """
     Self-contained panel for one camera.
     Top half: live mpv viewer with connect/disconnect.
-    Bottom half: FFmpeg recorder with record/stop and elapsed timer.
+    Bottom half: FFmpeg recorder with record/stop and elapsed timer,
+                 plus a snapshot button that grabs a still via ustreamer.
     """
 
     def __init__(self, title: str, prefix: str, parent=None) -> None:
@@ -306,6 +369,7 @@ class CameraPanel(QWidget):
         self._current_url   = ""
         self._stream_active = False
         self._worker        = None
+        self._snap_worker   = None   # active SnapshotWorker (if any)
         self._elapsed       = 0
         self._save_dir      = DEFAULT_SAVE
         self._last_save_path = ""
@@ -348,8 +412,8 @@ class CameraPanel(QWidget):
         self._file_lbl.setStyleSheet("color: #777; font-size: 10px;")
         self._file_lbl.setWordWrap(True)
 
-        # "Open file" button — hidden until a recording is saved
-        self._open_btn = QPushButton("▶  Open Video")
+        # "Open file" button — hidden until a recording/snapshot is saved
+        self._open_btn = QPushButton("▶  Open File")
         self._open_btn.setStyleSheet(
             "QPushButton { background-color: #1565c0; color: white; "
             "border-radius: 4px; padding: 3px 8px; font-size: 11px; }"
@@ -373,12 +437,26 @@ class CameraPanel(QWidget):
             "QPushButton:hover { background-color: #555; }"
             "QPushButton:disabled { background-color: #2a2a2a; color: #555; }"
         )
+
+        # ---- Snapshot button --------------------------------------------
+        self._snap_btn = QPushButton("📷")
+        self._snap_btn.setToolTip("Capture a still frame (ustreamer /snapshot)")
+        self._snap_btn.setFixedWidth(36)
+        self._snap_btn.setStyleSheet(
+            "QPushButton { background-color: #37474f; color: white; "
+            "border-radius: 4px; padding: 3px 4px; font-size: 14px; }"
+            "QPushButton:hover { background-color: #546e7a; }"
+            "QPushButton:disabled { background-color: #2a2a2a; color: #555; }"
+        )
+        self._snap_btn.clicked.connect(self.take_snapshot)
+
         self._record_btn.clicked.connect(self.start_recording_from_ui)
         self._stop_rec_btn.clicked.connect(self.stop_recording)
 
         rec_btn_row = QHBoxLayout()
         rec_btn_row.addWidget(self._record_btn)
         rec_btn_row.addWidget(self._stop_rec_btn)
+        rec_btn_row.addWidget(self._snap_btn)
 
         self._rec_timer = QTimer(self)
         self._rec_timer.setInterval(1000)
@@ -511,6 +589,61 @@ class CameraPanel(QWidget):
         return self._worker is not None and self._worker.isRunning()
 
     # ------------------------------------------------------------------
+    # Snapshot public API
+    # ------------------------------------------------------------------
+
+    def take_snapshot(self, snapshot_url: str = "", save_dir: str = "") -> None:
+        """
+        Fetch a still JPEG from ustreamer's /snapshot endpoint.
+
+        Parameters
+        ----------
+        snapshot_url : str
+            Full URL of the snapshot endpoint.  If empty, it is derived from
+            ``self._current_url`` by replacing the path with ``/snapshot``.
+        save_dir : str
+            Directory to save the JPEG.  Falls back to ``self._save_dir``.
+
+        The download runs on a ``SnapshotWorker`` QThread so the UI is never
+        blocked.  Only one snapshot per panel can be in-flight at a time;
+        subsequent clicks are ignored until the worker finishes.
+        """
+        if self._snap_worker and self._snap_worker.isRunning():
+            return  # already fetching — ignore the extra click
+
+        # Build the snapshot URL from the stream URL when not given explicitly.
+        if not snapshot_url:
+            if not self._current_url:
+                self._set_rec_status("No URL — connect first", error=True)
+                return
+            # Replace just the path component: http://ip:port/stream → /snapshot
+            from urllib.parse import urlparse, urlunparse
+            parts = urlparse(self._current_url)
+            snapshot_url = urlunparse(parts._replace(path=SNAPSHOT_PATH))
+
+        target_dir = save_dir or self._save_dir
+        try:
+            os.makedirs(target_dir, exist_ok=True)
+        except OSError as exc:
+            self._set_rec_status("Save dir error", error=True)
+            self._file_lbl.setText(str(exc))
+            return
+
+        timestamp   = datetime.now().strftime("%Y%m%d_%H%M%S")
+        output_path = os.path.join(target_dir, f"{self._prefix}_snap_{timestamp}.jpg")
+
+        self._snap_btn.setEnabled(False)
+        self._set_rec_status("📷 Capturing…")
+        self._open_btn.setVisible(False)
+
+        self._snap_worker = SnapshotWorker(snapshot_url, output_path)
+        self._snap_worker.finished_ok.connect(self._on_snap_ok)
+        self._snap_worker.error_occurred.connect(self._on_snap_error)
+        # Re-enable the button once the thread finishes (success or failure)
+        self._snap_worker.finished.connect(lambda: self._snap_btn.setEnabled(True))
+        self._snap_worker.start()
+
+    # ------------------------------------------------------------------
     # Internal — viewer
     # ------------------------------------------------------------------
 
@@ -574,11 +707,26 @@ class CameraPanel(QWidget):
         self._rec_status.setText(msg)
 
     def _open_saved_file(self) -> None:
-        """Open the saved video file in the system default player."""
+        """Open the saved video/image file in the system default application."""
         if self._last_save_path and Path(self._last_save_path).exists():
             QDesktopServices.openUrl(QUrl.fromLocalFile(self._last_save_path))
         else:
             self._file_lbl.setText("File not found — may still be writing")
+
+    # ------------------------------------------------------------------
+    # Internal — snapshot callbacks
+    # ------------------------------------------------------------------
+
+    def _on_snap_ok(self, path: str) -> None:
+        """Called on the Qt main thread when the JPEG has been written."""
+        self._last_save_path = path
+        self._set_rec_status("📷 Snapshot saved ✓", live=True)
+        self._file_lbl.setText(Path(path).name)
+        self._open_btn.setVisible(True)
+
+    def _on_snap_error(self, msg: str) -> None:
+        self._set_rec_status("Snapshot failed", error=True)
+        self._file_lbl.setText(msg[:80])
 
     # ------------------------------------------------------------------
     # Cleanup
@@ -669,6 +817,18 @@ class ROVDualViewer(QMainWindow):
         self._record_all_btn.clicked.connect(self._on_record_all)
         self._stop_all_btn.clicked.connect(self._on_stop_all)
 
+        # ---- Snapshot Both button ---------------------------------------
+        self._snap_all_btn = QPushButton("📷  Snapshot Both")
+        self._snap_all_btn.setToolTip(
+            "Capture a still frame from both cameras simultaneously"
+        )
+        self._snap_all_btn.setStyleSheet(
+            "QPushButton { background-color: #37474f; color: white; "
+            "font-weight: bold; border-radius: 4px; padding: 4px 12px; }"
+            "QPushButton:hover { background-color: #546e7a; }"
+        )
+        self._snap_all_btn.clicked.connect(self._on_snapshot_all)
+
         # Controls grid
         ctrl = QGridLayout()
         ctrl.setSpacing(6)
@@ -688,6 +848,8 @@ class ROVDualViewer(QMainWindow):
         stream_row.addSpacing(24)
         stream_row.addWidget(self._record_all_btn)
         stream_row.addWidget(self._stop_all_btn)
+        stream_row.addSpacing(24)
+        stream_row.addWidget(self._snap_all_btn)
         stream_row.addStretch()
 
         # ---- Root layout ------------------------------------------------
@@ -728,6 +890,15 @@ class ROVDualViewer(QMainWindow):
         return (
             f"http://{ip}:{port1}{STREAM_PATH}",
             f"http://{ip}:{port2}{STREAM_PATH}",
+        )
+
+    def _build_snapshot_urls(self) -> tuple[str, str]:
+        ip    = self._ip_edit.text().strip()
+        port1 = self._port1_edit.text().strip()
+        port2 = self._port2_edit.text().strip()
+        return (
+            f"http://{ip}:{port1}{SNAPSHOT_PATH}",
+            f"http://{ip}:{port2}{SNAPSHOT_PATH}",
         )
 
     def _browse_save_dir(self) -> None:
@@ -786,6 +957,20 @@ class ROVDualViewer(QMainWindow):
         self._stop_all_btn.setEnabled(False)
         self._status_bar.showMessage(
             "Recording stopped — files saved to " + self._save_edit.text()
+        )
+
+    # ------------------------------------------------------------------
+    # Slots — snapshot
+    # ------------------------------------------------------------------
+
+    def _on_snapshot_all(self) -> None:
+        """Trigger a simultaneous snapshot on both camera panels."""
+        snap1, snap2 = self._build_snapshot_urls()
+        save_dir = self._save_edit.text().strip() or DEFAULT_SAVE
+        self._cam1.take_snapshot(snapshot_url=snap1, save_dir=save_dir)
+        self._cam2.take_snapshot(snapshot_url=snap2, save_dir=save_dir)
+        self._status_bar.showMessage(
+            f"📷 Capturing snapshots from both cameras → {save_dir}"
         )
 
     # ------------------------------------------------------------------
