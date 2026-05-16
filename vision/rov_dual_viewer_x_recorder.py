@@ -50,6 +50,7 @@ import ctypes.util
 import locale
 import argparse
 import subprocess
+import threading
 from datetime import datetime
 from pathlib import Path
 
@@ -110,6 +111,18 @@ class RecordingWorker(QThread):
     -vsync cfr
         Constant-frame-rate output — prevents duplicate/dropped frames from
         causing choppiness in the saved file.
+
+    Pipe deadlock fix
+    ------------------
+    FFmpeg writes verbose progress/log output to stderr continuously. If the
+    parent process never reads from the stderr pipe, the OS pipe buffer fills
+    up (~64 KB on Linux), FFmpeg blocks trying to write, and it never exits —
+    so our wait(timeout=5) fires, kill() is called, and the output file is
+    left incomplete/corrupt.
+
+    The fix: drain stderr on a dedicated daemon thread the whole time FFmpeg
+    is running. We accumulate the last chunk so we can report errors, but we
+    never let the buffer stall FFmpeg.
     """
 
     status_changed = Signal(str)
@@ -123,6 +136,27 @@ class RecordingWorker(QThread):
         self.output_path     = output_path
         self._process        = None
         self._stop_requested = False
+        self._stderr_tail    = b""   # last bytes of stderr for error reporting
+
+    # ------------------------------------------------------------------
+    # Internal: drain stderr so the pipe never stalls FFmpeg
+    # ------------------------------------------------------------------
+
+    def _drain_stderr(self) -> None:
+        """
+        Runs on a daemon thread. Reads stderr line-by-line until EOF so the
+        OS pipe buffer never fills up and blocks FFmpeg. Keeps only the last
+        4 KB for error reporting; we don't need the full log in memory.
+        """
+        try:
+            for line in self._process.stderr:
+                self._stderr_tail = (self._stderr_tail + line)[-4096:]
+        except Exception:
+            pass  # process already gone — nothing to drain
+
+    # ------------------------------------------------------------------
+    # QThread entry point
+    # ------------------------------------------------------------------
 
     def run(self) -> None:
         cmd = [
@@ -136,11 +170,11 @@ class RecordingWorker(QThread):
             "-i", self.url,
 
             # ---- Output encoding ----------------------------------------
-            "-r",    "30",          # match your camera's actual frame rate
+            "-r",     "30",         # match your camera's actual frame rate
             "-vsync", "cfr",        # constant-frame-rate muxing
-            "-c:v",  "libx264",
+            "-c:v",   "libx264",
             "-preset", "ultrafast",
-            "-crf",  "23",
+            "-crf",   "23",
             "-movflags", "+faststart",
             "-an",                  # no audio
             self.output_path,
@@ -149,21 +183,43 @@ class RecordingWorker(QThread):
             self._process = subprocess.Popen(
                 cmd,
                 stdin=subprocess.PIPE,
-                stdout=subprocess.PIPE,
+                stdout=subprocess.DEVNULL,  # we never need stdout
                 stderr=subprocess.PIPE,
             )
+
+            # Drain stderr on a background daemon thread to prevent the OS
+            # pipe buffer from filling up and deadlocking FFmpeg.
+            drain_thread = threading.Thread(
+                target=self._drain_stderr,
+                daemon=True,
+                name="ffmpeg-stderr-drain",
+            )
+            drain_thread.start()
+
             self.status_changed.emit(f"● Recording → {Path(self.output_path).name}")
+
+            # Block until FFmpeg exits (normally or after stop() signals it).
             self._process.wait()
+
+            # Make sure the drain thread has finished before we inspect stderr.
+            drain_thread.join(timeout=2)
 
             if self._stop_requested:
                 self.status_changed.emit("Stopped")
-                # Only emit finished_ok if the file was actually written
-                if Path(self.output_path).exists() and Path(self.output_path).stat().st_size > 0:
+                if (
+                    Path(self.output_path).exists()
+                    and Path(self.output_path).stat().st_size > 0
+                ):
                     self.finished_ok.emit(self.output_path)
+                else:
+                    self.error_occurred.emit(
+                        "Recording stopped but no output file was written. "
+                        "The stream may not have been reachable."
+                    )
             elif self._process.returncode != 0:
-                err = self._process.stderr.read().decode(errors="replace")
+                err = self._stderr_tail.decode(errors="replace")
                 self.error_occurred.emit(
-                    f"FFmpeg error (code {self._process.returncode}): {err[-300:]}"
+                    f"FFmpeg error (code {self._process.returncode}):\n{err[-300:]}"
                 )
             else:
                 self.status_changed.emit("Finished")
@@ -180,19 +236,56 @@ class RecordingWorker(QThread):
         finally:
             self.finished.emit()
 
+    # ------------------------------------------------------------------
+    # Stop — send 'q' to FFmpeg's stdin for a clean, muxer-finalised file
+    # ------------------------------------------------------------------
+
     def stop(self) -> None:
+        """
+        Ask FFmpeg to stop gracefully by writing 'q' to its stdin.
+
+        FFmpeg intercepts the 'q' keystroke in its event loop and calls
+        av_write_trailer() before exiting, which finalises the MP4 container
+        (writes the moov atom / index).  Without this step the file is not
+        seekable and most players will refuse to open it.
+
+        We then give the process up to 8 seconds to finish muxing; if it
+        still hasn't exited (e.g. the stdin pipe was closed by the OS before
+        we wrote to it) we fall back to SIGTERM, and as a last resort SIGKILL.
+        The drain thread keeps running throughout so the pipe never stalls.
+        """
         self._stop_requested = True
-        if self._process and self._process.poll() is None:
-            # Send 'q' to ffmpeg's stdin for a clean, seekable file finish
-            try:
-                self._process.stdin.write(b"q\n")
-                self._process.stdin.flush()
-            except Exception:
-                pass
-            try:
-                self._process.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                self._process.kill()
+        proc = self._process
+        if proc is None or proc.poll() is not None:
+            return  # already gone
+
+        # 1. Polite: write 'q' + newline so FFmpeg flushes and exits cleanly.
+        try:
+            proc.stdin.write(b"q\n")
+            proc.stdin.flush()
+        except OSError:
+            pass  # stdin may already be closed — fall through to terminate
+
+        # 2. Wait up to 8 s for FFmpeg to write the MP4 trailer and exit.
+        try:
+            proc.wait(timeout=8)
+            return
+        except subprocess.TimeoutExpired:
+            pass
+
+        # 3. Escalate to SIGTERM.
+        try:
+            proc.terminate()
+            proc.wait(timeout=3)
+            return
+        except (subprocess.TimeoutExpired, OSError):
+            pass
+
+        # 4. Last resort: SIGKILL (file will likely be corrupt).
+        try:
+            proc.kill()
+        except OSError:
+            pass
 
 
 # ---------------------------------------------------------------------------
